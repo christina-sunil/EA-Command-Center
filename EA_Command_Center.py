@@ -26,14 +26,14 @@ with tab1:
 
     c1,c2,c3,c4,c5,c6,c7,c8 = st.columns(8)
 
-    c1.metric("Total", 0)
-    c2.metric("Access", 0)
-    c3.metric("L1", 0)
-    c4.metric("L2", 0)
-    c5.metric("L3", 0)
-    c6.metric("Assigned", 0)
-    c7.metric("Unassigned", 0)
-    c8.metric("Hybrid Med Age", 0)
+    c1.metric("Total", "Loading...")
+    c2.metric("Access", "Loading...")
+    c3.metric("L1", "Loading...")
+    c4.metric("L2", "Loading...")
+    c5.metric("L3", "Loading...")
+    c6.metric("Assigned", "Loading...")
+    c7.metric("Unassigned", "Loading...")
+    c8.metric("Hybrid Med Age", "Loading...")
 
     st.markdown("---")
 
