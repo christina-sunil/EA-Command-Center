@@ -913,4 +913,8 @@ with tab2:
         )
 
         st.dataframe(
-            review_
+    review_display,
+    use_container_width=True,
+    hide_index=True,
+)
+
