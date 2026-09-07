@@ -14,31 +14,32 @@ tab1, tab2 = st.tabs([
     "Week in Review"
 ])
 
-# =========================================================
+# =====================================================
 # BACKLOG
-# =========================================================
+# =====================================================
 
 with tab1:
 
-    st.subheader("EA Command Center - Backlog")
+    st.header("Backlog")
 
     # KPI ROW
-    c1,c2,c3,c4,c5,c6,c7,c8,c9 = st.columns(9)
+
+    c1,c2,c3,c4,c5,c6,c7,c8 = st.columns(8)
 
     c1.metric("Total", 0)
     c2.metric("Access", 0)
     c3.metric("L1", 0)
     c4.metric("L2", 0)
-    c5.metric("Sys Admin", 0)
-    c6.metric("Dev / Eng", 0)
+    c5.metric("L3", 0)
+    c6.metric("Assigned", 0)
     c7.metric("Unassigned", 0)
-    c8.metric("Assigned", 0)
-    c9.metric("Hybrid Med Age", 0)
+    c8.metric("Hybrid Med Age", 0)
 
-    st.divider()
+    st.markdown("---")
 
     # FILTERS
-    f1, f2, f3, f4 = st.columns(4)
+
+    f1,f2,f3,f4 = st.columns(4)
 
     with f1:
         team = st.multiselect(
@@ -74,49 +75,70 @@ with tab1:
             ]
         )
 
-    st.divider()
+    st.markdown("---")
 
     st.subheader("Team Scorecard")
 
-    scorecard_df = pd.DataFrame()
+    scorecard_df = pd.DataFrame(
+        columns=[
+            "Team",
+            "Access",
+            "L1",
+            "L2",
+            "L3",
+            "Assigned",
+            "Unassigned",
+            "Hybrid Med Age"
+        ]
+    )
 
     st.dataframe(
         scorecard_df,
-        use_container_width=True
+        use_container_width=True,
+        hide_index=True
     )
 
-    st.divider()
+    st.markdown("---")
 
     st.subheader("Top 10 Investigation")
 
-    top10_df = pd.DataFrame()
+    top10_df = pd.DataFrame(
+        columns=[
+            "Ticket",
+            "Assigned To",
+            "Assignment Group",
+            "Priority",
+            "Hybrid Age"
+        ]
+    )
 
     st.dataframe(
         top10_df,
-        use_container_width=True
+        use_container_width=True,
+        hide_index=True
     )
 
-# =========================================================
+# =====================================================
 # WEEK IN REVIEW
-# =========================================================
+# =====================================================
 
 with tab2:
 
-    st.subheader("EA Command Center - Week in Review")
+    st.header("Week in Review")
 
     st.markdown(
-        "### Show me all tickets assigned to a selected Assignment Group during a selected period"
+        "Show me all tickets assigned to a selected Assignment Group during a selected period."
     )
 
-    c1, c2 = st.columns(2)
+    f1,f2 = st.columns(2)
 
-    with c1:
+    with f1:
         assignment_group = st.selectbox(
             "Assignment Group",
             []
         )
 
-    with c2:
+    with f2:
         period = st.selectbox(
             "Period",
             [
@@ -127,34 +149,46 @@ with tab2:
             ]
         )
 
-    st.divider()
+    st.markdown("---")
 
-    m1,m2,m3,m4,m5 = st.columns(5)
+    c1,c2,c3,c4,c5 = st.columns(5)
 
-    m1.metric("Assigned", 0)
-    m2.metric("Closed", 0)
-    m3.metric("Backlog", 0)
-    m4.metric("TTR", 0)
-    m5.metric("Hybrid Age", 0)
+    c1.metric("Assigned", 0)
+    c2.metric("Closed", 0)
+    c3.metric("Backlog", 0)
+    c4.metric("TTR", 0)
+    c5.metric("Hybrid Age", 0)
 
-    st.divider()
+    st.markdown("---")
 
     st.subheader("Themes and Trends")
 
-    trend_df = pd.DataFrame()
-
-    st.dataframe(
-        trend_df,
-        use_container_width=True
+    themes_df = pd.DataFrame(
+        columns=[
+            "Theme",
+            "Count"
+        ]
     )
 
-    st.divider()
+    st.dataframe(
+        themes_df,
+        use_container_width=True,
+        hide_index=True
+    )
+
+    st.markdown("---")
 
     st.subheader("Improvement Opportunities")
 
-    improvement_df = pd.DataFrame()
+    opportunities_df = pd.DataFrame(
+        columns=[
+            "Opportunity",
+            "Description"
+        ]
+    )
 
     st.dataframe(
-        improvement_df,
-        use_container_width=True
+        opportunities_df,
+        use_container_width=True,
+        hide_index=True
     )
