@@ -9,11 +9,23 @@ PASSWORD = ""
 INSTANCE_URL = "https://progress1.service-now.com"
 
 def clean_display(x):
-if isinstance(x, dict):
-return x.get("display_value", "") or x.get("value", "") or ""
-if x is None:
-return ""
-return str(x)
+    if isinstance(x, dict):
+        return x.get("display_value", "") or x.get("value", "") or ""
+    if x is None:
+        return ""
+    return str(x)
+
+def map_priority(p):
+    p = str(p).lower()
+    if p.startswith("1") or "critical" in p:
+        return "Critical"
+    if p.startswith("2") or "high" in p:
+        return "High"
+    if p.startswith("3") or "moderate" in p or "medium" in p:
+        return "Medium"
+    if p.startswith("4") or "low" in p:
+        return "Low"
+    return "Other"
 
 st.set_page_config(
     page_title="EA Command Center",
