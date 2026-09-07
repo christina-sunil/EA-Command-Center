@@ -4,6 +4,17 @@ import requests
 import numpy as np
 import math
 
+USERNAME = "github_servicenow_api"
+PASSWORD = ""
+INSTANCE_URL = "https://progress1.service-now.com"
+
+def clean_display(x):
+if isinstance(x, dict):
+return x.get("display_value", "") or x.get("value", "") or ""
+if x is None:
+return ""
+return str(x)
+
 st.set_page_config(
     page_title="EA Command Center",
     page_icon="📊",
