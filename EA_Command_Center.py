@@ -1,920 +1,222 @@
-import os
 import math
-from datetime import timedelta
-
 import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
 
-
-# =====================================================
-# PAGE CONFIGURATION
-# =====================================================
-
-st.set_page_config(
-    page_title="EA Command Center",
-    page_icon="📊",
-    layout="wide",
-)
-
-
-# =====================================================
-# SERVICE NOW CONFIGURATION
-# Credentials must be stored in Streamlit Secrets.
-# Do not paste passwords into this file.
-# =====================================================
-
+st.set_page_config(page_title="EA Command Center", page_icon="📊", layout="wide")
 INSTANCE_URL = "https://progress1.service-now.com"
-
-USERNAME = "github_servicenow_api"
-PASSWORD = "wL<c&sLHGso(mH3mIRs=byF5C%97o>P3z[K+QZSD"
-
-# =====================================================
-# ASSIGNMENT GROUP CONFIGURATION
-# =====================================================
+USERNAME = st.secrets.get("SERVICENOW_USERNAME", "github_servicenow_api")
+PASSWORD = st.secrets.get("SERVICENOW_PASSWORD", "wL<c&sLHGso(mH3mIRs=byF5C%97o>P3z[K+QZSD")
 
 EA_GROUPS = [
-    "IT Supp: EAST - Delivery",
-    "IT Supp: EAST - Leads",
-    "IT Supp: System Access Requests",
-    "IT Supp: System Admins",
-    "IT Supp: ShareFile - CPQ",
-    "IT Supp: Quote to Invoice",
-    "IT Supp: Lead to Opp",
-    "IT Supp: Mulesoft Product Support",
-    "IT Supp: EA Shared Services",
-    "IT Supp: CS/TS",
+    "IT Supp: EAST - Delivery", "IT Supp: EAST - Leads",
+    "IT Supp: System Access Requests", "IT Supp: System Admins",
+    "IT Supp: ShareFile - CPQ", "IT Supp: Quote to Invoice",
+    "IT Supp: Lead to Opp", "IT Supp: Mulesoft Product Support",
+    "IT Supp: EA Shared Services", "IT Supp: CS/TS",
 ]
-
 GROUP_QUERY = ",".join(EA_GROUPS)
+AGE_THRESHOLDS = [(0,1),(3,2),(7,4),(14,6),(30,8),(60,9),(90,10)]
+INACTIVITY_THRESHOLDS = [(0,1),(2,3),(5,5),(10,7),(20,9),(30,10)]
+REASSIGNMENT_THRESHOLDS = [(0,1),(1,3),(2,5),(4,7),(6,9),(8,10)]
+THEME_KEYWORDS = {
+    "Access / Permissions": ["access","permission","login","password","role","security"],
+    "License / Renewal": ["license","licence","renewal","renew","subscription","entitlement"],
+    "Salesforce / CRM": ["salesforce","sfdc","crm","opportunity","lead","contact"],
+    "Integration": ["integration","mulesoft","api","interface","sync","job","failure"],
+    "ShareFile / CPQ": ["sharefile","cpq","quote","quoting","order","invoice"],
+    "Data / Reporting": ["report","reporting","tableau","dashboard","data","upload","extract"],
+}
 
+def clean_display(v):
+    if isinstance(v, dict): return v.get("display_value", "") or v.get("value", "") or ""
+    return "" if v is None else str(v).strip()
 
-# =====================================================
-# HELPER FUNCTIONS
-# =====================================================
-
-def clean_display(value):
-    if isinstance(value, dict):
-        return (
-            value.get("display_value", "")
-            or value.get("value", "")
-            or ""
-        )
-
-    if value is None:
-        return ""
-
-    return str(value).strip()
-
-
-def map_priority(priority):
-    value = str(priority).lower().strip()
-
-    if value.startswith("1") or "critical" in value:
-        return "Critical"
-
-    if value.startswith("2") or "high" in value:
-        return "High"
-
-    if (
-        value.startswith("3")
-        or "moderate" in value
-        or "medium" in value
-    ):
-        return "Medium"
-
-    if value.startswith("4") or "low" in value:
-        return "Low"
-
+def map_priority(v):
+    p = str(v).lower().strip()
+    if p.startswith("1") or "critical" in p: return "Critical"
+    if p.startswith("2") or "high" in p: return "High"
+    if p.startswith("3") or "moderate" in p or "medium" in p: return "Medium"
+    if p.startswith("4") or "low" in p: return "Low"
     return "Other"
 
-
-def level_from_group(group_name):
-    group_name = str(group_name)
-
-    if "System Access Requests" in group_name:
-        return "Access"
-
-    if "EAST - Delivery" in group_name:
-        return "L1"
-
-    if "EAST - Leads" in group_name:
-        return "L2"
-
-    if "System Admins" in group_name:
-        return "Sys Admin"
-
-    if (
-        "ShareFile - CPQ" in group_name
-        or "Quote to Invoice" in group_name
-        or "Lead to Opp" in group_name
-        or "Mulesoft Product Support" in group_name
-        or "EA Shared Services" in group_name
-        or "CS/TS" in group_name
-    ):
-        return "Dev / Eng"
-
+def level_from_group(g):
+    g = str(g)
+    if "System Access Requests" in g: return "Access"
+    if "EAST - Delivery" in g: return "L1"
+    if "EAST - Leads" in g: return "L2"
+    if "System Admins" in g: return "Sys Admin"
+    if any(x in g for x in ["ShareFile - CPQ","Quote to Invoice","Lead to Opp","Mulesoft Product Support","EA Shared Services","CS/TS"]): return "Dev / Eng"
     return "Other"
 
+def business_days_between(start, end):
+    if pd.isna(start) or pd.isna(end): return np.nan
+    start, end = pd.Timestamp(start).date(), pd.Timestamp(end).date()
+    return 0.0 if end <= start else float(np.busday_count(start, end))
 
-def business_days_between(start_timestamp, end_timestamp):
-    if pd.isna(start_timestamp) or pd.isna(end_timestamp):
-        return np.nan
-
-    start_date = pd.Timestamp(start_timestamp).date()
-    end_date = pd.Timestamp(end_timestamp).date()
-
-    if end_date <= start_date:
-        return 0.0
-
-    return float(np.busday_count(start_date, end_date))
-
-
-def period_start(period_name):
+def period_start(name):
     today = pd.Timestamp.now().normalize()
-
-    if period_name == "Week":
-        return today - pd.Timedelta(days=today.weekday())
-
-    if period_name == "Month":
-        return today.replace(day=1)
-
-    if period_name == "Quarter":
-        quarter_month = ((today.month - 1) // 3) * 3 + 1
-        return today.replace(month=quarter_month, day=1)
-
+    if name == "Week": return today - pd.Timedelta(days=today.weekday())
+    if name == "Month": return today.replace(day=1)
+    if name == "Quarter": return today.replace(month=((today.month-1)//3)*3+1, day=1)
     return today.replace(month=1, day=1)
 
-
-def interval_to_days(interval_name):
-    interval_map = {
-        "24hr": 1,
-        "48hr": 2,
-        "72hr": 3,
-        "120hr": 5,
-    }
-
-    return interval_map.get(interval_name, 5)
-
-
-def priority_score(priority):
-    score_map = {
-        "Critical": 10,
-        "High": 8,
-        "Medium": 5,
-        "Low": 2,
-        "Other": 1,
-    }
-
-    return score_map.get(priority, 1)
-
+def previous_period_range(name):
+    current = period_start(name)
+    delta = {"Week": pd.Timedelta(days=7), "Month": pd.DateOffset(months=1), "Quarter": pd.DateOffset(months=3), "Year": pd.DateOffset(years=1)}[name]
+    return current - delta, current
 
 def threshold_score(value, thresholds):
-    if pd.isna(value):
-        return 0
-
+    if pd.isna(value): return 0
     result = 1
-
     for minimum, score in thresholds:
-        if value >= minimum:
-            result = score
-        else:
-            break
-
+        if value >= minimum: result = score
+        else: break
     return result
 
+def priority_score(p): return {"Critical":10,"High":8,"Medium":5,"Low":2,"Other":1}.get(p,1)
 
-AGE_THRESHOLDS = [
-    (0, 1),
-    (3, 2),
-    (7, 4),
-    (14, 6),
-    (30, 8),
-    (60, 9),
-    (90, 10),
-]
+def identify_theme(text):
+    text = str(text).lower()
+    for theme, words in THEME_KEYWORDS.items():
+        if any(w in text for w in words): return theme
+    return "Other"
 
-INACTIVITY_THRESHOLDS = [
-    (0, 1),
-    (2, 3),
-    (5, 5),
-    (10, 7),
-    (20, 9),
-    (30, 10),
-]
-
-REASSIGNMENT_THRESHOLDS = [
-    (0, 1),
-    (1, 3),
-    (2, 5),
-    (4, 7),
-    (6, 9),
-    (8, 10),
-]
-
-
-# =====================================================
-# SERVICE NOW DATA RETRIEVAL
-# =====================================================
+def theme_summary(data):
+    if data.empty: return pd.DataFrame(columns=["Theme","Tickets","Share %"])
+    s = data["short_description"].apply(identify_theme).value_counts().rename_axis("Theme").reset_index(name="Tickets")
+    s["Share %"] = (s["Tickets"] / s["Tickets"].sum() * 100).round(1)
+    return s
 
 @st.cache_data(show_spinner="Loading Progress tickets...")
-def load_table(table_name, query, fields, max_rows=10000):
+def load_table(table, query, fields, max_rows):
     if not USERNAME or not PASSWORD:
-        raise RuntimeError(
-            "ServiceNow credentials are missing. "
-            "Add SERVICENOW_USERNAME and SERVICENOW_PASSWORD "
-            "in Streamlit Secrets."
-        )
+        raise RuntimeError("Add SERVICENOW_USERNAME and SERVICENOW_PASSWORD in Streamlit Secrets.")
+    url, rows, page_size = f"{INSTANCE_URL}/api/now/table/{table}", [], 2000
+    for offset in range(0, max_rows, page_size):
+        params = {"sysparm_query":query,"sysparm_display_value":"true","sysparm_exclude_reference_link":"true","sysparm_limit":str(min(page_size,max_rows-offset)),"sysparm_offset":str(offset),"sysparm_fields":fields}
+        r = requests.get(url, params=params, auth=(USERNAME,PASSWORD), headers={"Accept":"application/json"}, timeout=60)
+        if r.status_code >= 400: raise RuntimeError(f"ServiceNow API error for {table}: {r.status_code} - {r.text[:500]}")
+        batch = r.json().get("result", [])
+        if not batch: break
+        rows.extend(batch)
+        if len(batch) < page_size: break
+    return pd.DataFrame(rows)
 
-    url = f"{INSTANCE_URL}/api/now/table/{table_name}"
-
-    page_size = 2000
-    pages = max(1, math.ceil(max_rows / page_size))
-    all_rows = []
-
-    for page_number in range(pages):
-        offset = page_number * page_size
-        remaining_rows = max_rows - offset
-
-        if remaining_rows <= 0:
-            break
-
-        params = {
-            "sysparm_query": query,
-            "sysparm_display_value": "true",
-            "sysparm_exclude_reference_link": "true",
-            "sysparm_limit": str(min(page_size, remaining_rows)),
-            "sysparm_offset": str(offset),
-            "sysparm_fields": fields,
-        }
-
-        response = requests.get(
-            url,
-            params=params,
-            auth=(USERNAME, PASSWORD),
-            headers={"Accept": "application/json"},
-            timeout=60,
-        )
-
-        if response.status_code >= 400:
-            try:
-                error_details = response.json()
-            except Exception:
-                error_details = response.text
-
-            raise RuntimeError(
-                f"ServiceNow API error for {table_name}: "
-                f"{response.status_code} - {error_details}"
-            )
-
-        result = response.json().get("result", [])
-
-        if not result:
-            break
-
-        all_rows.extend(result)
-
-        if len(result) < page_size:
-            break
-
-    return pd.DataFrame(all_rows)
-
-
-def prepare_dataframe(dataframe, ticket_type):
-    if dataframe.empty:
-        return dataframe
-
-    work = dataframe.copy()
-    work["ticket_type"] = ticket_type
-
-    required_columns = [
-        "number",
-        "short_description",
-        "assignment_group",
-        "assigned_to",
-        "priority",
-        "state",
-        "sys_created_on",
-        "sys_updated_on",
-        "closed_at",
-        "reassignment_count",
-    ]
-
-    for column in required_columns:
-        if column not in work.columns:
-            work[column] = ""
-
-    work["assignment_group"] = work["assignment_group"].apply(
-        clean_display
-    )
-    work["assigned_to"] = work["assigned_to"].apply(clean_display)
-    work["state"] = work["state"].apply(clean_display)
-    work["priority"] = work["priority"].apply(map_priority)
-    work["short_description"] = work["short_description"].apply(
-        clean_display
-    )
-
-    work["open_date"] = pd.to_datetime(
-        work["sys_created_on"],
-        errors="coerce",
-    )
-    work["updated_date"] = pd.to_datetime(
-        work["sys_updated_on"],
-        errors="coerce",
-    )
-    work["closed_date"] = pd.to_datetime(
-        work["closed_at"],
-        errors="coerce",
-    )
-
-    work["reassignment_count"] = pd.to_numeric(
-        work["reassignment_count"],
-        errors="coerce",
-    ).fillna(0)
-
-    work["level"] = work["assignment_group"].apply(level_from_group)
-
-    return work
-
+def prepare(df, ticket_type):
+    required = ["sys_id","number","short_description","assignment_group","assigned_to","priority","state","active","sys_created_on","sys_updated_on","closed_at","reassignment_count"]
+    if df.empty: return pd.DataFrame(columns=required+["ticket_type","open_date","updated_date","closed_date","level"])
+    df = df.copy()
+    for c in required:
+        if c not in df.columns: df[c] = ""
+    df["ticket_type"] = ticket_type
+    for c in ["assignment_group","assigned_to","state","short_description"]: df[c] = df[c].apply(clean_display)
+    df["priority"] = df["priority"].apply(map_priority)
+    df["open_date"] = pd.to_datetime(df["sys_created_on"], errors="coerce")
+    df["updated_date"] = pd.to_datetime(df["sys_updated_on"], errors="coerce")
+    df["closed_date"] = pd.to_datetime(df["closed_at"], errors="coerce")
+    df["reassignment_count"] = pd.to_numeric(df["reassignment_count"], errors="coerce").fillna(0)
+    df["level"] = df["assignment_group"].apply(level_from_group)
+    df["ticket_url"] = df.apply(lambda r: f"{INSTANCE_URL}/task.do?sys_id={r['sys_id']}&number={r['number']}", axis=1)
+    return df
 
 @st.cache_data(show_spinner="Preparing EA Command Center data...")
-def get_command_center_data(max_rows=10000):
-    fields = (
-        "number,short_description,assignment_group,assigned_to,"
-        "priority,state,active,sys_created_on,sys_updated_on,"
-        "closed_at,reassignment_count"
-    )
-
-    open_query = (
-        f"active=true^assignment_group.nameIN{GROUP_QUERY}"
-    )
-
-    current_year = pd.Timestamp.now().year
-    review_start = f"{current_year}-01-01 00:00:00"
-
-    review_query = (
-        f"assignment_group.nameIN{GROUP_QUERY}"
-        f"^sys_created_on>={review_start}"
-    )
-
-    open_ritm = load_table(
-        "sc_req_item",
-        open_query,
-        fields,
-        max_rows,
-    )
-    open_incident = load_table(
-        "incident",
-        open_query,
-        fields,
-        max_rows,
-    )
-
-    review_ritm = load_table(
-        "sc_req_item",
-        review_query,
-        fields,
-        max_rows,
-    )
-    review_incident = load_table(
-        "incident",
-        review_query,
-        fields,
-        max_rows,
-    )
-
-    open_ritm = prepare_dataframe(open_ritm, "RITM")
-    open_incident = prepare_dataframe(open_incident, "INC")
-
-    review_ritm = prepare_dataframe(review_ritm, "RITM")
-    review_incident = prepare_dataframe(review_incident, "INC")
-
-    backlog = pd.concat(
-        [open_ritm, open_incident],
-        ignore_index=True,
-    )
-
-    review = pd.concat(
-        [review_ritm, review_incident],
-        ignore_index=True,
-    )
-
+def get_data(max_rows):
+    fields = "sys_id,number,short_description,assignment_group,assigned_to,priority,state,active,sys_created_on,sys_updated_on,closed_at,reassignment_count"
+    open_q = f"active=true^assignment_group.nameIN{GROUP_QUERY}"
+    year = pd.Timestamp.now().year
+    review_q = f"assignment_group.nameIN{GROUP_QUERY}^sys_created_on>={year}-01-01 00:00:00"
+    backlog = pd.concat([prepare(load_table("sc_req_item",open_q,fields,max_rows),"RITM"),prepare(load_table("incident",open_q,fields,max_rows),"INC")], ignore_index=True)
+    review = pd.concat([prepare(load_table("sc_req_item",review_q,fields,max_rows),"RITM"),prepare(load_table("incident",review_q,fields,max_rows),"INC")], ignore_index=True)
     now = pd.Timestamp.now()
-
     if not backlog.empty:
-        backlog["ticket_age_days"] = backlog["open_date"].apply(
-            lambda value: business_days_between(value, now)
-        )
-
-        backlog["inactivity_days"] = backlog["updated_date"].apply(
-            lambda value: business_days_between(value, now)
-        )
-
-        backlog["age_score"] = backlog["ticket_age_days"].apply(
-            lambda value: threshold_score(
-                value,
-                AGE_THRESHOLDS,
-            )
-        )
-
-        backlog["inactivity_score"] = backlog[
-            "inactivity_days"
-        ].apply(
-            lambda value: threshold_score(
-                value,
-                INACTIVITY_THRESHOLDS,
-            )
-        )
-
-        backlog["priority_score"] = backlog["priority"].apply(
-            priority_score
-        )
-
-        backlog["reassignment_score"] = backlog[
-            "reassignment_count"
-        ].apply(
-            lambda value: threshold_score(
-                value,
-                REASSIGNMENT_THRESHOLDS,
-            )
-        )
-
-        backlog["intervention_score"] = (
-            backlog["age_score"] * 0.35
-            + backlog["inactivity_score"] * 0.30
-            + backlog["priority_score"] * 0.20
-            + backlog["reassignment_score"] * 0.15
-        ).round(2)
-
+        backlog["ticket_age_days"] = backlog["open_date"].apply(lambda x: business_days_between(x,now))
+        backlog["inactivity_days"] = backlog["updated_date"].apply(lambda x: business_days_between(x,now))
+        backlog["intervention_score"] = (backlog["ticket_age_days"].apply(lambda x: threshold_score(x,AGE_THRESHOLDS))*0.35 + backlog["inactivity_days"].apply(lambda x: threshold_score(x,INACTIVITY_THRESHOLDS))*0.30 + backlog["priority"].apply(priority_score)*0.20 + backlog["reassignment_count"].apply(lambda x: threshold_score(x,REASSIGNMENT_THRESHOLDS))*0.15).round(2)
     if not review.empty:
-        review["ticket_age_days"] = review.apply(
-            lambda row: business_days_between(
-                row["open_date"],
-                row["closed_date"]
-                if pd.notna(row["closed_date"])
-                else now,
-            ),
-            axis=1,
-        )
-
-        review["ttr_days"] = review.apply(
-            lambda row: business_days_between(
-                row["open_date"],
-                row["closed_date"],
-            )
-            if pd.notna(row["closed_date"])
-            else np.nan,
-            axis=1,
-        )
-
+        review["ticket_age_days"] = review.apply(lambda r: business_days_between(r["open_date"], r["closed_date"] if pd.notna(r["closed_date"]) else now), axis=1)
+        review["ttr_days"] = review.apply(lambda r: business_days_between(r["open_date"],r["closed_date"]) if pd.notna(r["closed_date"]) else np.nan, axis=1)
     return backlog, review
 
-
-# =====================================================
-# LOAD DATA
-# =====================================================
+def show_link_table(df):
+    st.dataframe(df, use_container_width=True, hide_index=True, column_config={"Ticket": st.column_config.LinkColumn("Ticket", display_text=r"number=([^&]+)$")})
 
 st.title("Enterprise Applications Command Center")
-st.caption(
-    "Progress ticket operational scorecard. "
-    "Age calculations exclude Saturday and Sunday."
-)
+st.caption("Progress ticket operational scorecard. Hybrid Age and TTR exclude Saturday and Sunday.")
+c1,c2 = st.columns([3,1])
+with c1: max_rows = st.selectbox("Maximum records to load per table",[2000,5000,10000,20000],index=2)
+with c2:
+    st.write(""); st.write("")
+    if st.button("Refresh data",use_container_width=True): st.cache_data.clear(); st.rerun()
+try: backlog, review = get_data(max_rows)
+except Exception as e: st.error(str(e)); st.stop()
 
-control_col1, control_col2 = st.columns([3, 1])
-
-with control_col1:
-    max_to_load = st.selectbox(
-        "Maximum records to load per table",
-        [2000, 5000, 10000, 20000],
-        index=2,
-    )
-
-with control_col2:
-    st.write("")
-    st.write("")
-
-    if st.button("Refresh data", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
-
-try:
-    df_backlog, df_review = get_command_center_data(max_to_load)
-except Exception as error:
-    st.error(str(error))
-    st.info(
-        "Add the ServiceNow username and password in "
-        "Streamlit Secrets before running the dashboard."
-    )
-    st.stop()
-
-
-tab1, tab2 = st.tabs(
-    [
-        "Backlog",
-        "Week in Review",
-    ]
-)
-
-
-# =====================================================
-# BACKLOG TAB
-# =====================================================
-
+tab1,tab2 = st.tabs(["Backlog","Week in Review"])
 with tab1:
     st.header("Backlog")
-
-    if df_backlog.empty:
-        st.warning("No active Progress tickets were returned.")
+    if backlog.empty: st.warning("No active Progress tickets were returned.")
     else:
-        filter_col1, filter_col2 = st.columns(2)
-
-        with filter_col1:
-            selected_groups = st.multiselect(
-                "Assignment Group",
-                sorted(
-                    df_backlog["assignment_group"]
-                    .dropna()
-                    .unique()
-                    .tolist()
-                ),
-            )
-
-        with filter_col2:
-            selected_providers = st.multiselect(
-                "Provider / Assigned To",
-                sorted(
-                    [
-                        value
-                        for value in df_backlog[
-                            "assigned_to"
-                        ].dropna().unique().tolist()
-                        if value
-                    ]
-                ),
-            )
-
-        filtered_backlog = df_backlog.copy()
-
-        if selected_groups:
-            filtered_backlog = filtered_backlog[
-                filtered_backlog["assignment_group"].isin(
-                    selected_groups
-                )
-            ]
-
-        if selected_providers:
-            filtered_backlog = filtered_backlog[
-                filtered_backlog["assigned_to"].isin(
-                    selected_providers
-                )
-            ]
-
-        total = len(filtered_backlog)
-
-        access = int(
-            (filtered_backlog["level"] == "Access").sum()
-        )
-        l1 = int((filtered_backlog["level"] == "L1").sum())
-        l2 = int((filtered_backlog["level"] == "L2").sum())
-        sys_admin = int(
-            (filtered_backlog["level"] == "Sys Admin").sum()
-        )
-        dev_eng = int(
-            (filtered_backlog["level"] == "Dev / Eng").sum()
-        )
-
-        assigned = int(
-            filtered_backlog["assigned_to"]
-            .fillna("")
-            .str.strip()
-            .ne("")
-            .sum()
-        )
-
-        unassigned = total - assigned
-
-        hybrid_median_age = (
-            round(
-                filtered_backlog["ticket_age_days"].median(),
-                1,
-            )
-            if total
-            else 0
-        )
-
-        metric_columns = st.columns(8)
-
-        metric_columns[0].metric("Total", total)
-        metric_columns[1].metric("Access", access)
-        metric_columns[2].metric("L1", l1)
-        metric_columns[3].metric("L2", l2)
-        metric_columns[4].metric("Sys Admin", sys_admin)
-        metric_columns[5].metric("Dev / Eng", dev_eng)
-        metric_columns[6].metric("Unassigned", unassigned)
-        metric_columns[7].metric(
-            "Hybrid Median Age",
-            hybrid_median_age,
-        )
-
-        st.divider()
-
-        st.subheader("Assignment Group Scorecard")
-
-        scorecard_rows = []
-
-        for group_name, group_data in filtered_backlog.groupby(
-            "assignment_group"
-        ):
-            group_total = len(group_data)
-
-            group_assigned = int(
-                group_data["assigned_to"]
-                .fillna("")
-                .str.strip()
-                .ne("")
-                .sum()
-            )
-
-            scorecard_rows.append(
-                {
-                    "Assignment Group": group_name,
-                    "Total": group_total,
-                    "Access": int(
-                        (group_data["level"] == "Access").sum()
-                    ),
-                    "L1": int(
-                        (group_data["level"] == "L1").sum()
-                    ),
-                    "L2": int(
-                        (group_data["level"] == "L2").sum()
-                    ),
-                    "Sys Admin": int(
-                        (
-                            group_data["level"] == "Sys Admin"
-                        ).sum()
-                    ),
-                    "Dev / Eng": int(
-                        (
-                            group_data["level"] == "Dev / Eng"
-                        ).sum()
-                    ),
-                    "Assigned": group_assigned,
-                    "Unassigned": group_total - group_assigned,
-                    "Hybrid Median Age": round(
-                        group_data["ticket_age_days"].median(),
-                        1,
-                    ),
-                }
-            )
-
-        scorecard_df = pd.DataFrame(scorecard_rows)
-
-        if not scorecard_df.empty:
-            scorecard_df = scorecard_df.sort_values(
-                "Total",
-                ascending=False,
-            )
-
-        st.dataframe(
-            scorecard_df,
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        st.divider()
-
-        st.subheader("Top 10 Ticket Investigation")
-
-        investigation_col1, investigation_col2 = st.columns(2)
-
-        with investigation_col1:
-            view_option = st.selectbox(
-                "View",
-                [
-                    "Oldest",
-                    "Newest",
-                    "Last Updated",
-                    "Highest Intervention Score",
-                ],
-            )
-
-        with investigation_col2:
-            interval_warning = st.selectbox(
-                "Age Warning",
-                [
-                    "All",
-                    "24hr",
-                    "48hr",
-                    "72hr",
-                    "120hr",
-                ],
-                index=4,
-            )
-
-        investigation_data = filtered_backlog.copy()
-
-        if interval_warning != "All":
-            minimum_days = interval_to_days(interval_warning)
-
-            investigation_data = investigation_data[
-                investigation_data["ticket_age_days"]
-                >= minimum_days
-            ]
-
-        if view_option == "Oldest":
-            investigation_data = investigation_data.sort_values(
-                "ticket_age_days",
-                ascending=False,
-            )
-
-        elif view_option == "Newest":
-            investigation_data = investigation_data.sort_values(
-                "open_date",
-                ascending=False,
-            )
-
-        elif view_option == "Last Updated":
-            investigation_data = investigation_data.sort_values(
-                "updated_date",
-                ascending=True,
-            )
-
-        else:
-            investigation_data = investigation_data.sort_values(
-                "intervention_score",
-                ascending=False,
-            )
-
-        top_ten = investigation_data.head(10).copy()
-
-        display_columns = [
-            "number",
-            "ticket_type",
-            "short_description",
-            "assignment_group",
-            "assigned_to",
-            "priority",
-            "level",
-            "ticket_age_days",
-            "inactivity_days",
-            "updated_date",
-            "intervention_score",
-        ]
-
-        top_ten = top_ten[display_columns].rename(
-            columns={
-                "number": "Ticket",
-                "ticket_type": "Type",
-                "short_description": "Short Description",
-                "assignment_group": "Assignment Group",
-                "assigned_to": "Assigned To",
-                "priority": "Priority",
-                "level": "Work Type",
-                "ticket_age_days": "Hybrid Age",
-                "inactivity_days": "Business Days Since Update",
-                "updated_date": "Last Updated",
-                "intervention_score": "Intervention Score",
-            }
-        )
-
-        st.dataframe(
-            top_ten,
-            use_container_width=True,
-            hide_index=True,
-        )
-
-
-# =====================================================
-# WEEK IN REVIEW TAB
-# =====================================================
+        f1,f2 = st.columns(2)
+        with f1: groups = st.multiselect("Assignment Group",sorted(backlog["assignment_group"].dropna().unique()))
+        with f2: owners = st.multiselect("Provider / Assigned To",sorted(x for x in backlog["assigned_to"].dropna().unique() if x))
+        data = backlog.copy()
+        if groups: data = data[data["assignment_group"].isin(groups)]
+        if owners: data = data[data["assigned_to"].isin(owners)]
+        total, assigned = len(data), int(data["assigned_to"].fillna("").str.strip().ne("").sum())
+        cols = st.columns(9)
+        for col,label,value in zip(cols,["Total","Access","L1","L2","Sys Admin","Dev / Eng","Assigned","Unassigned","Avg Hybrid Age"],[total,*[int((data["level"]==x).sum()) for x in ["Access","L1","L2","Sys Admin","Dev / Eng"]],assigned,total-assigned,round(data["ticket_age_days"].mean(),1) if total else 0]): col.metric(label,value)
+        st.divider(); st.subheader("Assignment Group Scorecard")
+        closed_period = st.selectbox("Closed Ticket Period",["Week","Month","Quarter","Year"])
+        closed = review[review["closed_date"].notna() & (review["closed_date"] >= period_start(closed_period))]
+        rows=[]
+        for group,g in data.groupby("assignment_group"):
+            ga=int(g["assigned_to"].fillna("").str.strip().ne("").sum())
+            rows.append({"Assignment Group":group,"Backlog":len(g),**{x:int((g["level"]==x).sum()) for x in ["Access","L1","L2","Sys Admin","Dev / Eng"]},"Closed":int((closed["assignment_group"]==group).sum()),"Assigned":ga,"Unassigned":len(g)-ga,"Avg Hybrid Age":round(g["ticket_age_days"].mean(),1)})
+        st.dataframe(pd.DataFrame(rows).sort_values("Backlog",ascending=False),use_container_width=True,hide_index=True)
+        st.divider(); st.subheader("Top 10 Ticket Investigation")
+        i1,i2=st.columns(2)
+        with i1: view=st.selectbox("View",["Oldest","Newest","Last Updated","Highest Intervention Score"])
+        with i2: age=st.selectbox("Age Filter",["All",">5 Business Days"])
+        inv=data.copy()
+        if age==">5 Business Days": inv=inv[inv["ticket_age_days"]>5]
+        key,asc={"Oldest":("ticket_age_days",False),"Newest":("open_date",False),"Last Updated":("updated_date",True),"Highest Intervention Score":("intervention_score",False)}[view]
+        inv=inv.sort_values(key,ascending=asc).head(10)[["ticket_url","ticket_type","short_description","assignment_group","assigned_to","priority","level","ticket_age_days","inactivity_days","updated_date","intervention_score"]]
+        inv.columns=["Ticket","Type","Short Description","Assignment Group","Assigned To","Priority","Work Type","Hybrid Age","Business Days Since Update","Last Updated","Intervention Score"]
+        show_link_table(inv)
 
 with tab2:
     st.header("Week in Review")
-
-    if df_review.empty:
-        st.warning(
-            "No Progress tickets were returned for the review period."
-        )
+    if review.empty: st.warning("No Progress tickets were returned for the review period.")
     else:
-        review_col1, review_col2 = st.columns(2)
+        r1,r2=st.columns(2)
+        with r1: group=st.selectbox("Assignment Group",["All Assignment Groups"]+sorted(review["assignment_group"].dropna().unique()))
+        with r2: period=st.selectbox("Period",["Week","Month","Quarter","Year"])
+        data=review[review["open_date"]>=period_start(period)].copy()
+        if group!="All Assignment Groups": data=data[data["assignment_group"]==group]
+        assigned=int(data["assigned_to"].fillna("").str.strip().ne("").sum()); closed=int(data["closed_date"].notna().sum())
+        values=[len(data),assigned,closed,int(data["closed_date"].isna().sum()),round(data["ttr_days"].dropna().mean(),1) if data["ttr_days"].notna().any() else 0,round(data["ticket_age_days"].mean(),1) if len(data) else 0]
+        for c,l,v in zip(st.columns(6),["New","Assigned","Closed","Open / Backlog","Average TTR","Average Hybrid Age"],values): c.metric(l,v)
+        st.divider(); st.subheader("Theme & Trend Analysis")
+        themes=theme_summary(data)
+        if themes.empty: st.info("No tickets are available for theme analysis.")
+        else: st.dataframe(themes,use_container_width=True,hide_index=True)
+        ps,pe=previous_period_range(period); previous=review[(review["open_date"]>=ps)&(review["open_date"]<pe)]
+        if group!="All Assignment Groups": previous=previous[previous["assignment_group"]==group]
+        if len(previous): st.metric("Change vs Previous Period",f"{round((len(data)-len(previous))/len(previous)*100,1)}%",f"{len(data)-len(previous):+d} tickets")
+        else: st.info("No previous-period data is available for comparison.")
+        st.divider(); st.subheader("Improvement Opportunities")
+        inactivity=data["updated_date"].apply(lambda x: business_days_between(x,pd.Timestamp.now()))
+        opportunities=pd.DataFrame([
+            {"Opportunity":"Review tickets over 120 business hours","Ticket Count":int((data["ticket_age_days"]>5).sum()),"Suggested Focus":"Confirm owner, blocker, and next action."},
+            {"Opportunity":"Assign unassigned tickets","Ticket Count":int(data["assigned_to"].fillna("").str.strip().eq("").sum()),"Suggested Focus":"Confirm assignment group and provider."},
+            {"Opportunity":"Review open high-priority tickets","Ticket Count":int((data["priority"].isin(["Critical","High"])&data["closed_date"].isna()).sum()),"Suggested Focus":"Confirm priority, owner, and resolution plan."},
+            {"Opportunity":"Review tickets not updated over 5 business days","Ticket Count":int((inactivity>5).sum()),"Suggested Focus":"Request status and documented next step."},
+        ])
+        st.dataframe(opportunities,use_container_width=True,hide_index=True)
+        st.divider(); st.subheader("Ticket Set")
+        display=data[["ticket_url","ticket_type","short_description","assignment_group","assigned_to","priority","level","state","open_date","closed_date","ticket_age_days","ttr_days"]].copy()
+        display.columns=["Ticket","Type","Short Description","Assignment Group","Assigned To","Priority","Work Type","State","Opened","Closed","Hybrid Age","TTR"]
+        show_link_table(display)
 
-        with review_col1:
-            assignment_group = st.selectbox(
-                "Assignment Group",
-                ["All Assignment Groups"]
-                + sorted(
-                    df_review["assignment_group"]
-                    .dropna()
-                    .unique()
-                    .tolist()
-                ),
-            )
-
-        with review_col2:
-            period = st.selectbox(
-                "Period",
-                [
-                    "Week",
-                    "Month",
-                    "Quarter",
-                    "Year",
-                ],
-            )
-
-        selected_period_start = period_start(period)
-
-        review_data = df_review[
-            df_review["open_date"] >= selected_period_start
-        ].copy()
-
-        if assignment_group != "All Assignment Groups":
-            review_data = review_data[
-                review_data["assignment_group"]
-                == assignment_group
-            ]
-
-        assigned_count = int(
-            review_data["assigned_to"]
-            .fillna("")
-            .str.strip()
-            .ne("")
-            .sum()
-        )
-
-        closed_count = int(
-            review_data["closed_date"].notna().sum()
-        )
-
-        backlog_count = int(
-            review_data["closed_date"].isna().sum()
-        )
-
-        average_ttr = (
-            round(review_data["ttr_days"].dropna().mean(), 1)
-            if review_data["ttr_days"].notna().any()
-            else 0
-        )
-
-        average_hybrid_age = (
-            round(review_data["ticket_age_days"].mean(), 1)
-            if not review_data.empty
-            else 0
-        )
-
-        review_metrics = st.columns(5)
-
-        review_metrics[0].metric("Assigned", assigned_count)
-        review_metrics[1].metric("Closed", closed_count)
-        review_metrics[2].metric("Backlog", backlog_count)
-        review_metrics[3].metric(
-            "Average TTR",
-            average_ttr,
-        )
-        review_metrics[4].metric(
-            "Average Hybrid Age",
-            average_hybrid_age,
-        )
-
-        st.divider()
-
-        st.subheader("Ticket Set")
-
-        review_display = review_data[
-            [
-                "number",
-                "ticket_type",
-                "short_description",
-                "assignment_group",
-                "assigned_to",
-                "priority",
-                "state",
-                "open_date",
-                "closed_date",
-                "ticket_age_days",
-                "ttr_days",
-            ]
-        ].copy()
-
-        review_display = review_display.rename(
-            columns={
-                "number": "Ticket",
-                "ticket_type": "Type",
-                "short_description": "Short Description",
-                "assignment_group": "Assignment Group",
-                "assigned_to": "Assigned To",
-                "priority": "Priority",
-                "state": "State",
-                "open_date": "Opened",
-                "closed_date": "Closed",
-                "ticket_age_days": "Hybrid Age",
-                "ttr_days": "TTR",
-            }
-        )
-
-        st.dataframe(
-    review_display,
-    use_container_width=True,
-    hide_index=True,
-)
-
+st.divider(); st.caption("EA Command Center | Progress operational metrics | Hybrid Age uses business days only.")
