@@ -8,8 +8,8 @@ import streamlit as st
 st.set_page_config(page_title="EA Command Center", page_icon="📊", layout="wide")
 
 INSTANCE_URL = "https://progress1.service-now.com"
-USERNAME = st.secrets.get("SERVICENOW_USERNAME", "")
-PASSWORD = st.secrets.get("SERVICENOW_PASSWORD", "")
+USERNAME = st.secrets.get("SERVICENOW_USERNAME", "github_servicenow_api")
+PASSWORD = st.secrets.get("SERVICENOW_PASSWORD", "wL<c&sLHGso(mH3mIRs=byF5C%97o>P3z[K+QZSD")
 
 EA_GROUPS = [
     "IT Supp: EAST - Delivery",
