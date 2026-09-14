@@ -58,6 +58,17 @@ def map_priority(value):
     return "Other"
 
 
+def map_urgency(value):
+    urgency = str(value).lower().strip()
+    if urgency.startswith("1") or "high" in urgency:
+        return "High"
+    if urgency.startswith("2") or "medium" in urgency:
+        return "Medium"
+    if urgency.startswith("3") or "low" in urgency:
+        return "Low"
+    return "Other"
+
+
 def level_from_group(group_name):
     group_name = str(group_name)
     if "System Access Requests" in group_name:
@@ -97,19 +108,6 @@ def period_start(period_name):
     return today.replace(month=1, day=1)
 
 
-def previous_period_range(period_name):
-    current_start = period_start(period_name)
-    if period_name == "Week":
-        previous_start = current_start - pd.Timedelta(days=7)
-    elif period_name == "Month":
-        previous_start = current_start - pd.DateOffset(months=1)
-    elif period_name == "Quarter":
-        previous_start = current_start - pd.DateOffset(months=3)
-    else:
-        previous_start = current_start - pd.DateOffset(years=1)
-    return previous_start, current_start
-
-
 def threshold_score(value, thresholds):
     if pd.isna(value):
         return 0
@@ -143,12 +141,6 @@ def theme_summary(dataframe):
     return summary
 
 
-def pct_change(current_value, previous_value):
-    if previous_value == 0:
-        return np.nan
-    return round((current_value - previous_value) / previous_value * 100, 1)
-
-
 @st.cache_data(show_spinner="Loading Progress tickets...")
 def load_table(table_name, query, fields, max_rows):
     if not USERNAME or not PASSWORD:
@@ -169,8 +161,11 @@ def load_table(table_name, query, fields, max_rows):
             "sysparm_fields": fields,
         }
         response = requests.get(
-            url, params=params, auth=(USERNAME, PASSWORD),
-            headers={"Accept": "application/json"}, timeout=60,
+            url,
+            params=params,
+            auth=(USERNAME, PASSWORD),
+            headers={"Accept": "application/json"},
+            timeout=60,
         )
         if response.status_code >= 400:
             raise RuntimeError(
@@ -189,7 +184,7 @@ def load_table(table_name, query, fields, max_rows):
 def prepare_dataframe(dataframe, ticket_type):
     required = [
         "sys_id", "number", "short_description", "assignment_group", "assigned_to",
-        "priority", "state", "active", "sys_created_on", "sys_updated_on",
+        "priority", "urgency", "state", "active", "sys_created_on", "sys_updated_on",
         "closed_at", "reassignment_count",
     ]
     if dataframe.empty:
@@ -204,13 +199,15 @@ def prepare_dataframe(dataframe, ticket_type):
     for column in ["assignment_group", "assigned_to", "state", "short_description"]:
         work[column] = work[column].apply(clean_display)
     work["priority"] = work["priority"].apply(map_priority)
+    work["urgency"] = work["urgency"].apply(map_urgency)
     work["open_date"] = pd.to_datetime(work["sys_created_on"], errors="coerce")
     work["updated_date"] = pd.to_datetime(work["sys_updated_on"], errors="coerce")
     work["closed_date"] = pd.to_datetime(work["closed_at"], errors="coerce")
     work["reassignment_count"] = pd.to_numeric(work["reassignment_count"], errors="coerce").fillna(0)
     work["level"] = work["assignment_group"].apply(level_from_group)
     work["ticket_url"] = work.apply(
-        lambda row: f"{INSTANCE_URL}/task.do?sys_id={row['sys_id']}&number={row['number']}", axis=1
+        lambda row: f"{INSTANCE_URL}/task.do?sys_id={row['sys_id']}&number={row['number']}",
+        axis=1,
     )
     return work
 
@@ -218,7 +215,7 @@ def prepare_dataframe(dataframe, ticket_type):
 @st.cache_data(show_spinner="Preparing EA Command Center data...")
 def get_command_center_data(max_rows):
     fields = (
-        "sys_id,number,short_description,assignment_group,assigned_to,priority,state,active,"
+        "sys_id,number,short_description,assignment_group,assigned_to,priority,urgency,state,active,"
         "sys_created_on,sys_updated_on,closed_at,reassignment_count"
     )
     open_query = f"active=true^assignment_group.nameIN{GROUP_QUERY}"
@@ -242,24 +239,30 @@ def get_command_center_data(max_rows):
 
     now = pd.Timestamp.now()
     if not backlog.empty:
-        backlog["ticket_age_days"] = backlog["open_date"].apply(lambda x: business_days_between(x, now))
-        backlog["inactivity_days"] = backlog["updated_date"].apply(lambda x: business_days_between(x, now))
+        backlog["ticket_age_days"] = backlog["open_date"].apply(lambda value: business_days_between(value, now))
+        backlog["inactivity_days"] = backlog["updated_date"].apply(lambda value: business_days_between(value, now))
         backlog["intervention_score"] = (
-            backlog["ticket_age_days"].apply(lambda x: threshold_score(x, AGE_THRESHOLDS)) * 0.35
-            + backlog["inactivity_days"].apply(lambda x: threshold_score(x, INACTIVITY_THRESHOLDS)) * 0.30
+            backlog["ticket_age_days"].apply(lambda value: threshold_score(value, AGE_THRESHOLDS)) * 0.35
+            + backlog["inactivity_days"].apply(lambda value: threshold_score(value, INACTIVITY_THRESHOLDS)) * 0.30
             + backlog["priority"].apply(priority_score) * 0.20
-            + backlog["reassignment_count"].apply(lambda x: threshold_score(x, REASSIGNMENT_THRESHOLDS)) * 0.15
+            + backlog["reassignment_count"].apply(
+                lambda value: threshold_score(value, REASSIGNMENT_THRESHOLDS)
+            ) * 0.15
         ).round(2)
+
     for data in [created, closed]:
         if not data.empty:
             data["ticket_age_days"] = data.apply(
                 lambda row: business_days_between(
-                    row["open_date"], row["closed_date"] if pd.notna(row["closed_date"]) else now
-                ), axis=1,
+                    row["open_date"],
+                    row["closed_date"] if pd.notna(row["closed_date"]) else now,
+                ),
+                axis=1,
             )
             data["ttr_days"] = data.apply(
                 lambda row: business_days_between(row["open_date"], row["closed_date"])
-                if pd.notna(row["closed_date"]) else np.nan, axis=1,
+                if pd.notna(row["closed_date"]) else np.nan,
+                axis=1,
             )
     return backlog, created, closed
 
@@ -289,11 +292,35 @@ def assignment_group_options(dataframe):
     return sorted(values[values.str.strip().ne("")].unique().tolist())
 
 
+def priority_operational_summary(dataframe):
+    priority_order = ["Critical", "High", "Medium", "Low", "Other"]
+    rows = []
+    for priority in priority_order:
+        priority_data = dataframe[dataframe["priority"] == priority]
+        if priority_data.empty:
+            continue
+        assigned = int(priority_data["assigned_to"].fillna("").astype(str).str.strip().ne("").sum())
+        rows.append({
+            "Priority": priority,
+            "Open Tickets": len(priority_data),
+            "Assigned": assigned,
+            "Unassigned": len(priority_data) - assigned,
+            "Avg Hybrid Age": round(priority_data["ticket_age_days"].mean(), 1),
+            "Avg Days Since Update": round(priority_data["inactivity_days"].mean(), 1),
+        })
+    return pd.DataFrame(rows)
+
+
 st.title("Enterprise Applications Command Center")
 st.caption("Progress ticket operational scorecard. Hybrid Age and TTR exclude Saturday and Sunday.")
+
 control_col1, control_col2 = st.columns([3, 1])
 with control_col1:
-    max_to_load = st.selectbox("Maximum records to load per table", [2000, 5000, 10000, 20000], index=2)
+    max_to_load = st.selectbox(
+        "Maximum records to load per table",
+        [2000, 5000, 10000, 20000],
+        index=2,
+    )
 with control_col2:
     st.write("")
     st.write("")
@@ -312,17 +339,25 @@ tab1, tab2 = st.tabs(["Backlog", "Week in Review"])
 
 with tab1:
     st.header("Backlog")
+
     if df_backlog.empty:
         st.warning("No active Progress tickets were returned.")
     else:
         filter_col1, filter_col2 = st.columns(2)
         with filter_col1:
-            selected_groups = st.multiselect("Assignment Group", assignment_group_options(df_backlog))
+            selected_groups = st.multiselect(
+                "Assignment Group",
+                assignment_group_options(df_backlog),
+            )
         with filter_col2:
             selected_providers = st.multiselect(
                 "Provider / Assigned To",
-                sorted([v for v in df_backlog["assigned_to"].dropna().astype(str).unique().tolist() if v.strip()]),
+                sorted([
+                    value for value in df_backlog["assigned_to"].dropna().astype(str).unique().tolist()
+                    if value.strip()
+                ]),
             )
+
         filtered = df_backlog.copy()
         if selected_groups:
             filtered = filtered[filtered["assignment_group"].isin(selected_groups)]
@@ -331,10 +366,20 @@ with tab1:
 
         total = len(filtered)
         assigned = int(filtered["assigned_to"].fillna("").astype(str).str.strip().ne("").sum())
-        levels = {name: int((filtered["level"] == name).sum()) for name in ["Access", "L1", "L2", "L3", "Sys Admin"]}
+        levels = {
+            name: int((filtered["level"] == name).sum())
+            for name in ["Access", "L1", "L2", "L3", "Sys Admin"]
+        }
         metric_values = [
-            total, levels["Access"], levels["L1"], levels["L2"], levels["L3"], levels["Sys Admin"],
-            assigned, total - assigned, round(filtered["ticket_age_days"].mean(), 1) if total else 0,
+            total,
+            levels["Access"],
+            levels["L1"],
+            levels["L2"],
+            levels["L3"],
+            levels["Sys Admin"],
+            assigned,
+            total - assigned,
+            round(filtered["ticket_age_days"].mean(), 1) if total else 0,
         ]
         for column, label, value in zip(
             st.columns(9),
@@ -342,114 +387,231 @@ with tab1:
             metric_values,
         ):
             column.metric(label, value)
+
         median_age = round(filtered["ticket_age_days"].median(), 1) if total else 0
         st.caption(f"Median Hybrid Age: {median_age} business days")
 
         st.divider()
-        st.subheader("Assignment Group Scorecard")
-        closed_period = st.selectbox("Closed Ticket Period", ["Week", "Month", "Quarter", "Year"])
-        closed_for_period = df_closed[
-            df_closed["closed_date"].notna() & (df_closed["closed_date"] >= period_start(closed_period))
-        ].copy()
+        st.subheader("Assignment Group Open Backlog Scorecard")
+        st.caption("This table contains current open tickets only. Closed and Assigned columns were removed.")
+
         scorecard_rows = []
         for group_name, group_data in filtered.groupby("assignment_group"):
-            group_assigned = int(group_data["assigned_to"].fillna("").astype(str).str.strip().ne("").sum())
             scorecard_rows.append({
                 "Assignment Group": group_name,
-                "Backlog": len(group_data),
+                "Open": len(group_data),
                 "Access": int((group_data["level"] == "Access").sum()),
                 "L1": int((group_data["level"] == "L1").sum()),
                 "L2": int((group_data["level"] == "L2").sum()),
                 "L3": int((group_data["level"] == "L3").sum()),
                 "Sys Admin": int((group_data["level"] == "Sys Admin").sum()),
-                "Closed": int((closed_for_period["assignment_group"] == group_name).sum()),
-                "Assigned": group_assigned,
-                "Unassigned": len(group_data) - group_assigned,
+                "Unassigned": int(
+                    group_data["assigned_to"].fillna("").astype(str).str.strip().eq("").sum()
+                ),
                 "Avg Hybrid Age": round(group_data["ticket_age_days"].mean(), 1),
             })
+
         scorecard = pd.DataFrame(scorecard_rows)
         if scorecard.empty:
             st.info("No assignment group data is available.")
         else:
-            st.dataframe(scorecard.sort_values("Backlog", ascending=False), use_container_width=True, hide_index=True)
+            st.dataframe(
+                scorecard.sort_values("Open", ascending=False),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        st.divider()
+        st.subheader("Open Backlog by Priority")
+        priority_summary = priority_operational_summary(filtered)
+        if priority_summary.empty:
+            st.info("No priority data is available.")
+        else:
+            st.dataframe(priority_summary, use_container_width=True, hide_index=True)
 
         st.divider()
         st.subheader("Top 10 Ticket Investigation")
         investigation_col1, investigation_col2 = st.columns(2)
         with investigation_col1:
             view_option = st.selectbox(
-                "View", ["Oldest", "Newest", "Last Updated", "Highest Intervention Score"]
+                "View",
+                ["Oldest", "Newest", "Last Updated", "Highest Intervention Score"],
             )
         with investigation_col2:
             age_filter = st.selectbox(
-                "Age Filter", ["All", ">=5 Business Days", ">=10 Business Days", ">=20 Business Days"]
+                "Age Filter",
+                ["All", ">=5 Business Days", ">=10 Business Days", ">=20 Business Days"],
             )
+
         investigation = filtered.copy()
-        minimum_age = {"All": 0, ">=5 Business Days": 5, ">=10 Business Days": 10, ">=20 Business Days": 20}[age_filter]
+        minimum_age = {
+            "All": 0,
+            ">=5 Business Days": 5,
+            ">=10 Business Days": 10,
+            ">=20 Business Days": 20,
+        }[age_filter]
         if age_filter != "All":
             investigation = investigation[investigation["ticket_age_days"] >= minimum_age]
+
         sort_column, ascending = {
             "Oldest": ("ticket_age_days", False),
             "Newest": ("open_date", False),
             "Last Updated": ("updated_date", True),
             "Highest Intervention Score": ("intervention_score", False),
         }[view_option]
-        investigation = investigation.sort_values(sort_column, ascending=ascending, na_position="last").head(10)
+
+        investigation = investigation.sort_values(
+            sort_column,
+            ascending=ascending,
+            na_position="last",
+        ).head(10)
+
         display = investigation[[
             "ticket_url", "ticket_type", "short_description", "assignment_group", "assigned_to",
-            "priority", "level", "ticket_age_days", "inactivity_days", "updated_date", "intervention_score",
+            "priority", "urgency", "level", "ticket_age_days", "inactivity_days",
+            "updated_date", "intervention_score",
         ]].copy()
         display.columns = [
-            "Ticket", "Type", "Short Description", "Assignment Group", "Assigned To", "Priority",
-            "Work Type", "Hybrid Age", "Business Days Since Update", "Last Updated", "Intervention Score",
+            "Ticket", "Type", "Short Description", "Assignment Group", "Assigned To",
+            "Priority", "Urgency", "Work Type", "Hybrid Age", "Business Days Since Update",
+            "Last Updated", "Intervention Score",
         ]
         show_link_table(display)
 
 with tab2:
     st.header("Week in Review")
+
     if df_created.empty and df_closed.empty:
         st.warning("No Progress tickets were returned for the review period.")
     else:
         review_col1, review_col2 = st.columns(2)
-        all_groups = sorted(set(assignment_group_options(df_created) + assignment_group_options(df_closed)))
+        all_groups = sorted(set(
+            assignment_group_options(df_created)
+            + assignment_group_options(df_closed)
+            + assignment_group_options(df_backlog)
+        ))
+
         with review_col1:
-            selected_group = st.selectbox("Assignment Group", ["All Assignment Groups"] + all_groups)
+            selected_group = st.selectbox(
+                "Assignment Group",
+                ["All Assignment Groups"] + all_groups,
+                key="review_group",
+            )
         with review_col2:
-            selected_period = st.selectbox("Period", ["Week", "Month", "Quarter", "Year"])
+            selected_period = st.selectbox(
+                "Period",
+                ["Week", "Month", "Quarter", "Year"],
+                key="review_period",
+            )
 
         current_start = period_start(selected_period)
         current_end = pd.Timestamp.now()
+
         new_data = df_created[
-            (df_created["open_date"] >= current_start) & (df_created["open_date"] <= current_end)
+            (df_created["open_date"] >= current_start)
+            & (df_created["open_date"] <= current_end)
         ].copy()
         closed_data = df_closed[
-            (df_closed["closed_date"] >= current_start) & (df_closed["closed_date"] <= current_end)
+            (df_closed["closed_date"] >= current_start)
+            & (df_closed["closed_date"] <= current_end)
         ].copy()
         current_backlog = df_backlog.copy()
+
         if selected_group != "All Assignment Groups":
             new_data = new_data[new_data["assignment_group"] == selected_group]
             closed_data = closed_data[closed_data["assignment_group"] == selected_group]
             current_backlog = current_backlog[current_backlog["assignment_group"] == selected_group]
 
+        assigned_count = int(
+            new_data["assigned_to"].fillna("").astype(str).str.strip().ne("").sum()
+        )
         new_count = len(new_data)
-        assigned_count = int(new_data["assigned_to"].fillna("").astype(str).str.strip().ne("").sum())
         closed_count = len(closed_data)
         backlog_count = len(current_backlog)
-        average_ttr = round(closed_data["ttr_days"].dropna().mean(), 1) if closed_data["ttr_days"].notna().any() else 0
+        average_ttr = (
+            round(closed_data["ttr_days"].dropna().mean(), 1)
+            if closed_data["ttr_days"].notna().any()
+            else 0
+        )
         average_age = round(new_data["ticket_age_days"].mean(), 1) if not new_data.empty else 0
+
         for column, label, value in zip(
             st.columns(6),
             ["New", "Assigned", "Closed", "Open / Backlog", "Average TTR", "Average Hybrid Age"],
             [new_count, assigned_count, closed_count, backlog_count, average_ttr, average_age],
         ):
             column.metric(label, value)
+
         st.caption(
             "Assigned counts selected-period tickets that currently have an Assigned To value. "
             "Open / Backlog is the current active backlog for the selected assignment group."
         )
 
         st.divider()
-        st.subheader("Theme & Trend Analysis")
+        st.subheader("Priority, Urgency, and Age Analysis")
+
+        analysis_source = current_backlog.copy()
+        priority_options = ["All Priorities", "Critical", "High", "Medium", "Low", "Other"]
+        selected_priority = st.selectbox(
+            "Priority",
+            priority_options,
+            key="week_priority",
+        )
+        if selected_priority != "All Priorities":
+            analysis_source = analysis_source[analysis_source["priority"] == selected_priority]
+
+        priority_urgency_summary = (
+            analysis_source.groupby(["priority", "urgency"], dropna=False)
+            .agg(
+                Open_Tickets=("number", "count"),
+                Average_Hybrid_Age=("ticket_age_days", "mean"),
+                Average_Days_Since_Update=("inactivity_days", "mean"),
+            )
+            .reset_index()
+            .rename(columns={
+                "priority": "Priority",
+                "urgency": "Urgency",
+                "Open_Tickets": "Open Tickets",
+                "Average_Hybrid_Age": "Avg Hybrid Age",
+                "Average_Days_Since_Update": "Avg Days Since Update",
+            })
+        )
+        if not priority_urgency_summary.empty:
+            priority_urgency_summary["Avg Hybrid Age"] = priority_urgency_summary["Avg Hybrid Age"].round(1)
+            priority_urgency_summary["Avg Days Since Update"] = priority_urgency_summary[
+                "Avg Days Since Update"
+            ].round(1)
+            st.dataframe(priority_urgency_summary, use_container_width=True, hide_index=True)
+        else:
+            st.info("No open tickets match the selected priority.")
+
+        st.divider()
+        st.subheader("Closed Tickets by Priority and Urgency")
+        closed_priority_summary = (
+            closed_data.groupby(["priority", "urgency"], dropna=False)
+            .agg(
+                Closed_Tickets=("number", "count"),
+                Average_TTR=("ttr_days", "mean"),
+                Average_Age=("ticket_age_days", "mean"),
+            )
+            .reset_index()
+            .rename(columns={
+                "priority": "Priority",
+                "urgency": "Urgency",
+                "Closed_Tickets": "Closed Tickets",
+                "Average_TTR": "Avg TTR",
+                "Average_Age": "Avg Age",
+            })
+        )
+        if not closed_priority_summary.empty:
+            closed_priority_summary["Avg TTR"] = closed_priority_summary["Avg TTR"].round(1)
+            closed_priority_summary["Avg Age"] = closed_priority_summary["Avg Age"].round(1)
+            st.dataframe(closed_priority_summary, use_container_width=True, hide_index=True)
+        else:
+            st.info("No closed tickets match the selected period and group.")
+
+        st.divider()
+        st.subheader("Theme Analysis")
         themes = theme_summary(new_data)
         if themes.empty:
             st.info("No new tickets are available for theme analysis.")
@@ -465,29 +627,6 @@ with tab2:
                 f"({int(top_theme['Tickets'])} tickets, {top_theme['Share %']}%)."
             )
 
-        previous_start, previous_end = previous_period_range(selected_period)
-        previous_new = df_created[
-            (df_created["open_date"] >= previous_start) & (df_created["open_date"] < previous_end)
-        ].copy()
-        previous_closed = df_closed[
-            (df_closed["closed_date"] >= previous_start) & (df_closed["closed_date"] < previous_end)
-        ].copy()
-        if selected_group != "All Assignment Groups":
-            previous_new = previous_new[previous_new["assignment_group"] == selected_group]
-            previous_closed = previous_closed[previous_closed["assignment_group"] == selected_group]
-        trend = pd.DataFrame([
-            {
-                "Metric": "New", "Current Period": new_count, "Previous Period": len(previous_new),
-                "Change": new_count - len(previous_new), "Change %": pct_change(new_count, len(previous_new)),
-            },
-            {
-                "Metric": "Closed", "Current Period": closed_count, "Previous Period": len(previous_closed),
-                "Change": closed_count - len(previous_closed), "Change %": pct_change(closed_count, len(previous_closed)),
-            },
-        ])
-        st.write("Period-over-Period Trend")
-        st.dataframe(trend, use_container_width=True, hide_index=True)
-
         st.divider()
         st.subheader("Improvement Opportunities")
         inactivity = current_backlog["updated_date"].apply(
@@ -501,7 +640,9 @@ with tab2:
             },
             {
                 "Opportunity": "Assign unassigned tickets",
-                "Ticket Count": int(current_backlog["assigned_to"].fillna("").astype(str).str.strip().eq("").sum()),
+                "Ticket Count": int(
+                    current_backlog["assigned_to"].fillna("").astype(str).str.strip().eq("").sum()
+                ),
                 "Suggested Focus": "Confirm assignment group and provider.",
             },
             {
@@ -523,22 +664,25 @@ with tab2:
             new_data.assign(review_status="New / Created"),
             closed_data.assign(review_status="Closed"),
         ], ignore_index=True).drop_duplicates(subset=["ticket_type", "sys_id"])
+
         if ticket_set.empty:
             st.info("No tickets match the selected period and group.")
         else:
             display = ticket_set[[
                 "ticket_url", "ticket_type", "short_description", "assignment_group", "assigned_to",
-                "priority", "level", "state", "open_date", "closed_date", "ticket_age_days",
-                "ttr_days", "review_status",
+                "priority", "urgency", "level", "state", "open_date", "closed_date",
+                "ticket_age_days", "ttr_days", "review_status",
             ]].copy()
             display.columns = [
-                "Ticket", "Type", "Short Description", "Assignment Group", "Assigned To", "Priority",
-                "Work Type", "State", "Opened", "Closed", "Hybrid Age", "TTR", "Review Status",
+                "Ticket", "Type", "Short Description", "Assignment Group", "Assigned To",
+                "Priority", "Urgency", "Work Type", "State", "Opened", "Closed",
+                "Hybrid Age", "TTR", "Review Status",
             ]
             show_link_table(display)
 
 st.divider()
 st.caption(
     "EA Command Center | Progress operational metrics | Hybrid Age and TTR use business days only "
-    "(Monday-Friday; holidays are not excluded)."
+    "(Monday-Friday; holidays are not excluded). Assigned is based on the current Assigned To value; "
+    "historical assignment events require ServiceNow audit/history data."
 )
